@@ -99,22 +99,156 @@ static void LogAddress(JNIEnv*env,jobject obj,const char *message,const struct s
         LogMessage(env,obj,"%s %s :%hu.",message,ip,port);
     }
 }
-static void AcceptOnSocket(JNIEnv*env,jobject obj,int sd){
+static int AcceptOnSocket(JNIEnv*env,jobject obj,int sd){
    struct sockaddr_in address;
     socklen_t addressLength= sizeof(address);
+    LogMessage(env,obj,"Wating for a client connection...");
+    int clientSocket=accept(sd,(struct sockaddr*)&address,&addressLength);
+    if(-1==clientSocket){
+        ThrowErrnoException(env,"java/io/IOException",errno);
+    } else{
+        LogAddress(env,obj,"Client connection from",&address);
+    }
+    return clientSocket;
+}
+static ssize_t  ReceiveFromSocket(JNIEnv* env,jobject obj,int sd,char *buffer,size_t bufferSize){
+    LogMessage(env,obj,"Receiving from the socket....");
+    ssize_t  recvSize=recv(sd,buffer,bufferSize-1,0);
+    if(-1==recvSize){
+        ThrowErrnoException(env,"java/io/IOException",errno);
+    } else{
+        buffer[recvSize]=NULL;
+        if(recvSize>0){
+            LogMessage(env,obj,"Received %d bytes: %s",recvSize,buffer);
+        } else{
+            LogMessage(env,obj,"Client disconnected.");
+        }
+        return recvSize;
+    }
+}
+static ssize_t  SendToSocket(JNIEnv*env,jobject obj,int sd,const char *buffer,size_t bufferSize){
+    LogMessage(env,obj,"Sending to the socket...");
+    ssize_t  sentSize=send (sd,buffer,bufferSize,0);
+    if (-1 == sentSize)
+    {
+        ThrowErrnoException(env, "java/io/IOException", errno);
+    }
+    else
+    {
+        if (sentSize > 0)
+        {
+            LogMessage(env, obj, "Sent %d bytes: %s", sentSize, buffer);
+        }
+        else
+        {
+            LogMessage(env, obj, "Client disconnected.");
+        }
+    }
 
+    return sentSize;
+}
+static void ConnectToAddress(JNIEnv *env,jobject obj,int sd,const char *ip, unsigned short port){
+    LogMessage(env,obj,"Connecting to %s:%un...",ip,port);
+    struct sockaddr_in address;
+    memset(&address,0, sizeof(address));
+    address.sin_family=PF_INET;
+    if(0==inet_aton(ip,&(address.sin_addr))){
+        ThrowErrnoException(env,"java/io/IOException",errno);
+    } else{
+        address.sin_port=htons(port);
+        if(-1==connect(sd,(const sockaddr*)&address, sizeof(address))){
+            ThrowErrnoException(env,"java/io/IOException",errno);
+        } else{
+            LogMessage(env,obj,"Connected.");
+        }
+    }
+
+}
+static int NewUdpSocket(JNIEnv*env,jobject obj){
+    LogMessage(env,obj,"Constructing a new UDP socket...");
+    int udpSocket=socket(PF_INET,SOCK_DGRAM,0);
+    if(-1==udpSocket){
+        ThrowErrnoException(env,"java/io/IOException",errno);
+    }
+    return udpSocket;
+}
+static ssize_t SendDataGramToSocket(JNIEnv*env,jobject obj,int sd,const struct sockaddr_in *address,const char *buffer,size_t bufferSize){
+    // Send data buffer to the socket
+    LogAddress(env, obj, "Sending to", address);
+    ssize_t sentSize = sendto(sd, buffer, bufferSize, 0,
+                              (const sockaddr*) address,
+                              sizeof(struct sockaddr_in));
+
+    // If send is failed
+    if (-1 == sentSize)
+    {
+        // Throw an exception with error number
+        ThrowErrnoException(env, "java/io/IOException", errno);
+    }
+    else if (sentSize > 0)
+    {
+        LogMessage(env, obj, "Sent %d bytes: %s", sentSize, buffer);
+    }
+
+    return sentSize;
+}
+static ssize_t ReceiveDatagramFromSocket(JNIEnv*env,
+                                         jobject obj,
+                                         int sd,
+                                         struct sockaddr_in *address,
+                                         char* buffer,size_t bufferSize){
+    socklen_t addressLength=sizeof(struct sockaddr_in);
+    LogMessage(env,obj,"Receiving from the socket...");
+    ssize_t recvSize=recvfrom(sd,buffer,bufferSize,0,(struct sockaddr*)address,&addressLength);
+    if(-1==recvSize){
+        ThrowErrnoException(env,"java/io/IOException",errno);
+    }
+    else{
+        LogMessage(env,obj,"Received from",address);
+        buffer[recvSize]=NULL;
+        if(recvSize>0){
+            LogMessage(env,obj,"Received %d bytes:%s",recvSize,buffer);
+        }
+    }
+    return recvSize;
 }
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_minhuizhu_echo_EchoClientActivity_nativeStartUdpClient(JNIEnv *env, jobject instance,
-                                                                jstring ip_, jint port,
-                                                                jstring message_) {
-    const char *ip = env->GetStringUTFChars(ip_, 0);
-    const char *message = env->GetStringUTFChars(message_, 0);
-
-
-    env->ReleaseStringUTFChars(ip_, ip);
-    env->ReleaseStringUTFChars(message_, message);
+                                                                jstring ip, jint port,
+                                                                jstring message) {
+   int clientSocket= NewUdpSocket(env,instance);
+    if(NULL==env->ExceptionOccurred()){
+        struct sockaddr_in address;
+        memset(&address,0, sizeof(address));
+        address.sin_family=PF_INET;
+        const char * ipAddress=env->GetStringUTFChars(ip,NULL);
+        if(NULL==ipAddress)
+            goto exit;
+        int result=inet_aton(ipAddress,&(address.sin_addr));
+        env->ReleaseStringUTFChars(ip,ipAddress);
+        if(0==result){
+            ThrowErrnoException(env,"java/io/IOException",errno);
+            goto exit;
+        }
+        address.sin_port=htons(port);
+        const char*messageText=env->GetStringUTFChars(message,NULL);
+        if(NULL==messageText)
+            goto exit;
+        jsize messageSize=env->GetStringUTFLength(message);
+        SendDataGramToSocket(env,instance,clientSocket,&address,messageText,messageSize);
+        env->ReleaseStringUTFChars(message,messageText);
+        if(NULL!=env->ExceptionOccurred())
+            goto exit;
+        char buffer[MAX_BUFFER_SIZE];
+        memset(&address,0, sizeof(address));
+        ReceiveDatagramFromSocket(env,instance,clientSocket,&address,buffer,MAX_BUFFER_SIZE);
+    }
+    exit:
+    if (clientSocket > 0)
+    {
+        close(clientSocket);
+    }
 }
 extern "C"
 JNIEXPORT void JNICALL
@@ -122,7 +256,7 @@ Java_com_minhuizhu_echo_LocalEchoActivity_nativeStartLocalServer(JNIEnv *env, jo
                                                                  jstring name_) {
     const char *name = env->GetStringUTFChars(name_, 0);
 
-    // TODO
+
 
     env->ReleaseStringUTFChars(name_, name);
 }
@@ -130,24 +264,43 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_com_minhuizhu_echo_EchoServerActivity_nativeStartTcpServer(JNIEnv *env, jobject instance,
                                                                 jint port) {
+ int serverSocket=   NewTcpSocket(env,instance);
+    if(NULL==env->ExceptionOccurred()){
+        BindSocketToPort(env,instance,serverSocket,(unsigned short )port);
+        if(NULL!=env->ExceptionOccurred()){
+            goto exit;
+        }
+        int clientSocket=AcceptOnSocket(env,instance,serverSocket);
+        if(NULL!=env->ExceptionOccurred())
+            goto exit;
+        char buffer[MAX_BUFFER_SIZE];
+        ssize_t recvSize;
+        ssize_t sentSize;
+        while(1){
+            recvSize=ReceiveFromSocket(env,instance,clientSocket,buffer,MAX_BUFFER_SIZE);
+            if((0==recvSize)||(NULL!=env->ExceptionOccurred()))
+                break;
+            sentSize=SendToSocket(env,instance,clientSocket,buffer,(size_t)recvSize);
+            if((0==sentSize)||(NULL!=env->ExceptionOccurred()))
+                break;
+        }
+        close(clientSocket);
+    }
 
-    // TODO
-
+exit:
+    if(serverSocket>0){
+        close(serverSocket);
+    }
 }
+
+
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_minhuizhu_echo_EchoServerActivity_nativeStartUdpServer(JNIEnv *env, jobject instance,
                                                                 jint port) {
 
-    // TODO
 
 }
 
-extern "C"
-jstring
-Java_com_minhuizhu_echo_MainActivity_stringFromJNI(
-        JNIEnv *env,
-        jobject /* this */) {
-    std::string hello = "Hello from C++";
-    return env->NewStringUTF(hello.c_str());
-}
+
